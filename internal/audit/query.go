@@ -7,12 +7,51 @@ import (
 	"heatpulse/internal/store"
 )
 
-type Query struct {
-	log *store.EventLog
+type eventLister interface {
+	List(limit int) ([]store.Event, error)
 }
 
-func NewQuery(log *store.EventLog) *Query {
+type Query struct {
+	log eventLister
+}
+
+func NewQuery(log eventLister) *Query {
 	return &Query{log: log}
+}
+
+// Entry returns the audit entry with the given ID, if recorded.
+func (q *Query) Entry(id string) (Entry, bool, error) {
+	events, err := q.log.List(0)
+	if err != nil {
+		return Entry{}, false, err
+	}
+	for _, event := range events {
+		if event.ID != id {
+			continue
+		}
+		return decodeEntry(event), true, nil
+	}
+	return Entry{}, false, nil
+}
+
+func decodeEntry(event store.Event) Entry {
+	entry := Entry{
+		ID: event.ID, Message: event.Message, At: event.At,
+		EntityID: event.EntityID, Details: map[string]any{},
+	}
+	if len(event.Kind) >= len("audit.") && event.Kind[:len("audit.")] == "audit." {
+		entry.Action = event.Kind[len("audit."):]
+	}
+	if actor, ok := event.Fields["actor"].(string); ok {
+		entry.Actor = actor
+	}
+	if outcome, ok := event.Fields["outcome"].(string); ok {
+		entry.Outcome = Outcome(outcome)
+	}
+	if details, ok := event.Fields["details"].(map[string]any); ok {
+		entry.Details = details
+	}
+	return entry
 }
 
 func (q *Query) Recent(filter Filter) ([]Entry, error) {
@@ -25,16 +64,7 @@ func (q *Query) Recent(filter Filter) ([]Entry, error) {
 		if len(event.Kind) < len("audit.") || event.Kind[:len("audit.")] != "audit." {
 			continue
 		}
-		entry := Entry{
-			ID: event.ID, Action: event.Kind[len("audit."):], EntityID: event.EntityID,
-			Message: event.Message, At: event.At, Details: map[string]any{},
-		}
-		if actor, ok := event.Fields["actor"].(string); ok {
-			entry.Actor = actor
-		}
-		if outcome, ok := event.Fields["outcome"].(string); ok {
-			entry.Outcome = Outcome(outcome)
-		}
+		entry := decodeEntry(event)
 		if filter.Match(entry) {
 			entries = append(entries, entry)
 		}

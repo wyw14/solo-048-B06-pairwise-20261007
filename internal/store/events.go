@@ -29,11 +29,22 @@ func NewEventLog(path string) *EventLog {
 	return &EventLog{path: path}
 }
 
+var ErrEventExists = errors.New("event already recorded")
+
 func (l *EventLog) Append(event Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
+	}
+	if event.ID != "" {
+		exists, err := l.containsLocked(event.ID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrEventExists
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
 		return fmt.Errorf("create event directory: %w", err)
@@ -47,6 +58,38 @@ func (l *EventLog) Append(event Event) error {
 		return fmt.Errorf("append event: %w", err)
 	}
 	return file.Sync()
+}
+
+// Contains reports whether an event with the given ID is already in the log.
+func (l *EventLog) Contains(id string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.containsLocked(id)
+}
+
+func (l *EventLog) containsLocked(id string) (bool, error) {
+	file, err := os.Open(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open event log: %w", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return false, fmt.Errorf("decode event: %w", err)
+		}
+		if event.ID == id {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("scan event log: %w", err)
+	}
+	return false, nil
 }
 
 func (l *EventLog) List(limit int) ([]Event, error) {

@@ -45,6 +45,10 @@ func (r *Registry) List() []Station {
 func (r *Registry) Update(stationID string, change func(*Station) error) (Station, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.updateLocked(stationID, change)
+}
+
+func (r *Registry) updateLocked(stationID string, change func(*Station) error) (Station, error) {
 	item, ok := r.stations[stationID]
 	if !ok {
 		return Station{}, fmt.Errorf("station %s not found", stationID)
@@ -56,6 +60,30 @@ func (r *Registry) Update(stationID string, change func(*Station) error) (Statio
 	item.UpdatedAt = time.Now().UTC()
 	r.stations[stationID] = item.Clone()
 	return item, nil
+}
+
+// UpdateMany applies change to every station under a single lock. Every change
+// runs on a clone first; if any of them fails nothing is committed.
+func (r *Registry) UpdateMany(stationIDs []string, change func(*Station) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := make(map[string]Station, len(stationIDs))
+	for _, stationID := range stationIDs {
+		item, ok := r.stations[stationID]
+		if !ok {
+			return fmt.Errorf("station %s not found", stationID)
+		}
+		item = item.Clone()
+		if err := change(&item); err != nil {
+			return err
+		}
+		updated[stationID] = item
+	}
+	for _, item := range updated {
+		item.UpdatedAt = time.Now().UTC()
+		r.stations[item.ID] = item.Clone()
+	}
+	return nil
 }
 
 func (r *Registry) SetOnline(stationID string, online bool) (Station, error) {

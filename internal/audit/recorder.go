@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,11 +10,18 @@ import (
 	"heatpulse/internal/store"
 )
 
-type Recorder struct {
-	log *store.EventLog
+// eventStore is the subset of store.EventLog the recorder needs. It is an
+// interface so callers can inject a failing store in tests.
+type eventStore interface {
+	Append(store.Event) error
+	Contains(id string) (bool, error)
 }
 
-func NewRecorder(log *store.EventLog) *Recorder {
+type Recorder struct {
+	log eventStore
+}
+
+func NewRecorder(log eventStore) *Recorder {
 	return &Recorder{log: log}
 }
 
@@ -43,6 +51,29 @@ func (r *Recorder) Record(entry Entry) (Entry, error) {
 		return Entry{}, err
 	}
 	return entry, nil
+}
+
+// RecordOnce records an entry under a caller-changed deterministic ID. It is
+// idempotent: a retry with the same ID after a crash or ambiguous write returns
+// recorded=false instead of appending a duplicate.
+func (r *Recorder) RecordOnce(id string, entry Entry) (Entry, bool, error) {
+	if id == "" {
+		return Entry{}, false, fmt.Errorf("audit entry id is required")
+	}
+	entry.ID = id
+	recorded, err := r.Record(entry)
+	if errors.Is(err, store.ErrEventExists) {
+		return entry, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	return recorded, true, nil
+}
+
+// Exists reports whether an audit entry with the given ID was already recorded.
+func (r *Recorder) Exists(id string) (bool, error) {
+	return r.log.Contains(id)
 }
 
 func (r *Recorder) Accepted(action, entityID, actor, message string, details map[string]any) error {

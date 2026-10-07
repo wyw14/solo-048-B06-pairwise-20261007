@@ -1,14 +1,27 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"heatpulse/internal/dispatch"
 )
 
 func (a *App) listPlans(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, a.Planner.Plans())
+}
+
+func (a *App) getPlan(w http.ResponseWriter, r *http.Request) {
+	plan, ok := a.Planner.Plan(chi.URLParam(r, "planID"))
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("plan not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
 }
 
 func (a *App) createPlan(w http.ResponseWriter, r *http.Request) {
@@ -28,6 +41,14 @@ func (a *App) createPlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, plan)
 }
 
+// publishResponse carries the plan even on failure so callers can inspect what
+// actually happened (committed revision, applied targets, message) and decide
+// whether to recalculate or safely retry.
+type publishResponse struct {
+	Code string        `json:"code,omitempty"`
+	Plan dispatch.Plan `json:"plan"`
+}
+
 func (a *App) publishPlan(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Actor string `json:"actor"`
@@ -37,11 +58,32 @@ func (a *App) publishPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan, err := a.Publisher.Publish(chi.URLParam(r, "planID"), input.Actor)
-	if err != nil {
-		writeError(w, http.StatusConflict, err)
+	if err == nil {
+		writeJSON(w, http.StatusOK, plan)
 		return
 	}
-	writeJSON(w, http.StatusOK, plan)
+	var publishErr *dispatch.PublishError
+	if !errors.As(err, &publishErr) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	status := http.StatusInternalServerError
+	switch publishErr.Code {
+	case dispatch.PublishNotFound:
+		status = http.StatusNotFound
+	case dispatch.PublishConflict:
+		status = http.StatusConflict
+	case dispatch.PublishRejected:
+		// 422: targets were valid input but the stations refused the publish;
+		// nothing was applied and a corrected retry is safe.
+		status = http.StatusUnprocessableEntity
+	case dispatch.PublishAuditUnavailable:
+		// Targets and plan state are settled; only the audit trail is missing.
+		status = http.StatusFailedDependency
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(responseEnvelope{Data: publishResponse{Code: string(publishErr.Code), Plan: publishErr.Plan}, Error: err.Error()})
 }
 
 func (a *App) applyHold(w http.ResponseWriter, r *http.Request) {
