@@ -1,14 +1,27 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"heatpulse/internal/dispatch"
 )
 
 func (a *App) listPlans(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, a.Planner.Plans())
+}
+
+func (a *App) getPlan(w http.ResponseWriter, r *http.Request) {
+	plan, ok := a.Planner.Plan(chi.URLParam(r, "planID"))
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("plan %s not found", chi.URLParam(r, "planID")))
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
 }
 
 func (a *App) createPlan(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +51,11 @@ func (a *App) publishPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	plan, err := a.Publisher.Publish(chi.URLParam(r, "planID"), input.Actor)
 	if err != nil {
-		writeError(w, http.StatusConflict, err)
+		status := http.StatusConflict
+		if errors.Is(err, dispatch.ErrPlanNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, plan)

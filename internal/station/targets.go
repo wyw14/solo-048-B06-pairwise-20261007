@@ -3,7 +3,6 @@ package station
 import (
 	"fmt"
 	"sync"
-	"time"
 )
 
 type TargetService struct {
@@ -20,6 +19,29 @@ func NewTargetService(registry *Registry) *TargetService {
 		}
 	}
 	return &TargetService{registry: registry, revision: revision}
+}
+
+// StaleError reports a source revision that no longer matches the current
+// target revision. The plan must be recalculated from a fresh snapshot;
+// republishing it can never succeed.
+type StaleError struct {
+	Source  uint64
+	Current uint64
+}
+
+func (e *StaleError) Error() string {
+	return fmt.Sprintf("dispatch source revision %d is stale; current is %d", e.Source, e.Current)
+}
+
+// ValidationError reports a target that cannot be applied as planned
+// (unknown station, manual hold, outside the operating envelope).
+type ValidationError struct {
+	StationID string
+	Reason    string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("station %s: %s", e.StationID, e.Reason)
 }
 
 func (s *TargetService) Revision() uint64 {
@@ -56,29 +78,42 @@ func (s *TargetService) ReleaseHold(stationID string) (uint64, error) {
 	return s.revision, err
 }
 
-func (s *TargetService) CompareAndPublish(sourceRevision uint64, targets map[string]float64) error {
+// CompareAndPublish atomically replaces every station target and returns the
+// revision the targets were applied at. Every target is validated before any
+// mutation happens: on error no station is modified and the revision is left
+// untouched, so the failure is fully observable and safe to retry with a
+// recalculated plan.
+func (s *TargetService) CompareAndPublish(sourceRevision uint64, targets map[string]float64) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sourceRevision != s.revision {
-		return fmt.Errorf("dispatch source revision %d is stale; current is %d", sourceRevision, s.revision)
+		return s.revision, &StaleError{Source: sourceRevision, Current: s.revision}
+	}
+	// Validate everything first: a partial publish would leave stations on
+	// mixed revisions with no way to observe or undo it.
+	for stationID, celsius := range targets {
+		if celsius < 35 || celsius > 95 {
+			return s.revision, &ValidationError{StationID: stationID, Reason: fmt.Sprintf("target %.1f outside operating envelope", celsius)}
+		}
+		item, ok := s.registry.Get(stationID)
+		if !ok {
+			return s.revision, &ValidationError{StationID: stationID, Reason: "station not found"}
+		}
+		if item.Hold {
+			return s.revision, &ValidationError{StationID: stationID, Reason: "station is manually held"}
+		}
 	}
 	s.revision++
 	for stationID, celsius := range targets {
-		if celsius < 35 || celsius > 95 {
-			return fmt.Errorf("target %.1f for %s outside operating envelope", celsius, stationID)
-		}
-		_, err := s.registry.Update(stationID, func(item *Station) error {
-			if item.Hold {
-				return fmt.Errorf("station %s is manually held", stationID)
-			}
+		// Cannot fail: existence and holds were validated above, and hold
+		// changes are serialized by this same lock.
+		if _, err := s.registry.Update(stationID, func(item *Station) error {
 			item.TargetCelsius = celsius
 			item.TargetRevision = s.revision
-			item.UpdatedAt = time.Now().UTC()
 			return nil
-		})
-		if err != nil {
-			return err
+		}); err != nil {
+			return s.revision, fmt.Errorf("apply target for %s: %w", stationID, err)
 		}
 	}
-	return nil
+	return s.revision, nil
 }

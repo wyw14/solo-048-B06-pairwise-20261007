@@ -44,6 +44,7 @@ func (a *App) Handler() http.Handler {
 		api.Post("/sections/{sectionID}/isolate", a.isolateSection)
 		api.Get("/dispatch/plans", a.listPlans)
 		api.Post("/dispatch/plans", a.createPlan)
+		api.Get("/dispatch/plans/{planID}", a.getPlan)
 		api.Post("/dispatch/plans/{planID}/publish", a.publishPlan)
 		api.Post("/dispatch/holds", a.applyHold)
 		api.Delete("/dispatch/holds/{stationID}", a.releaseHold)
